@@ -7,9 +7,10 @@ import (
 	"errors"
 	"io"
 	"os/exec"
+	"reflect"
 	"strings"
 
-	"github.com/gocarina/gocsv"
+	"github.com/jszwec/csvutil"
 )
 
 // QueryAll returns all items with all columns
@@ -67,14 +68,43 @@ func Query(class string, columns []string, where string, out interface{}) error 
 			sb.WriteString("\n")
 		}
 	}
-	gocsv.SetCSVReader(func(in io.Reader) gocsv.CSVReader {
-		r := csv.NewReader(in)
-		r.LazyQuotes = true
-		return r
-	})
-	err = gocsv.UnmarshalString(sb.String(), out)
+
+	outerValue := reflect.ValueOf(out)
+	if outerValue.Kind() == reflect.Ptr {
+		outerValue = outerValue.Elem()
+	}
+	defer outerValue.Close()
+	innerType := outerValue.Type().Elem()
+	if innerType.Kind() == reflect.Ptr {
+		innerType = innerType.Elem()
+	}
+
+	source := sb.String()
+	csvReader := csv.NewReader(strings.NewReader(source))
+	csvReader.LazyQuotes = true
+
+	dec, err := csvutil.NewDecoder(csvReader)
 	if err != nil {
 		return err
 	}
+
+	result := make([]reflect.Value, 0)
+
+	for {
+		i := reflect.New(innerType)
+		if err := dec.Decode(&i); err == io.EOF {
+			break
+		} else if err != nil {
+			// Ignore errors
+		}
+		result = append(result, i)
+	}
+
+	outerValue.Set(reflect.MakeSlice(outerValue.Type(), len(result), len(result)))
+
+	for _, i := range result {
+		outerValue.Send(i)
+	}
+
 	return nil
 }
