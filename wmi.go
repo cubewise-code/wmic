@@ -14,6 +14,8 @@ import (
 	"github.com/jszwec/csvutil"
 )
 
+var fieldCache = map[string]string{}
+
 // RecordError holds information about an error for record in the WMI result
 type RecordError struct {
 	Class   string
@@ -27,7 +29,7 @@ func (e *RecordError) Record() string {
 	return strings.Join(e.Items, ",")
 }
 
-// QueryAll returns all items with all columns
+// QueryAll returns all items with columns matching the out struct
 func QueryAll(class string, out interface{}) ([]RecordError, error) {
 	return Query(class, []string{}, "", out)
 }
@@ -47,6 +49,29 @@ func Query(class string, columns []string, where string, out interface{}) ([]Rec
 
 	recordErrors := []RecordError{}
 
+	// Get the outer type (needs to be a slice)
+	outerValue := reflect.ValueOf(out)
+	if outerValue.Kind() == reflect.Ptr {
+		outerValue = outerValue.Elem()
+	}
+
+	if outerValue.Kind() != reflect.Slice {
+		return recordErrors, fmt.Errorf("You must provide a slice to the out argument")
+	}
+
+	// Get the inner type of the slice
+	innerType := outerValue.Type().Elem()
+	innerTypeIsPointer := false
+	if innerType.Kind() == reflect.Ptr {
+		// If a pointer get the underlying type
+		innerTypeIsPointer = true
+		innerType = innerType.Elem()
+	}
+
+	if innerType.Kind() != reflect.Struct {
+		return recordErrors, fmt.Errorf("You must provide a struct as the type of the out slice")
+	}
+
 	query := []string{"PATH", class}
 	if where != "" {
 		parts := strings.Split(strings.TrimSpace(where), " ")
@@ -60,7 +85,23 @@ func Query(class string, columns []string, where string, out interface{}) ([]Rec
 		}
 	}
 	query = append(query, "GET")
-	if len(columns) > 0 {
+
+	// If the column list is empty use the struct to create the get list
+	if len(columns) == 0 {
+		structName := innerType.Name()
+		if val, ok := fieldCache[structName]; ok {
+			query = append(query, val)
+		} else {
+			cols := []string{}
+			for i := 0; i < innerType.NumField(); i++ {
+				n := innerType.Field(i).Name
+				cols = append(cols, n)
+			}
+			colString := strings.Join(cols, ",")
+			fieldCache[structName] = colString
+			query = append(query, colString)
+		}
+	} else {
 		query = append(query, strings.Join(columns, ","))
 	}
 	query = append(query, "/format:csv")
@@ -84,29 +125,6 @@ func Query(class string, columns []string, where string, out interface{}) ([]Rec
 			sb.WriteString(strings.ReplaceAll(s, "\"", ""))
 			sb.WriteString("\n")
 		}
-	}
-
-	// Get the outer type (needs to be a slice)
-	outerValue := reflect.ValueOf(out)
-	if outerValue.Kind() == reflect.Ptr {
-		outerValue = outerValue.Elem()
-	}
-
-	if outerValue.Kind() != reflect.Slice {
-		return recordErrors, fmt.Errorf("You must provide a slice to the out argument")
-	}
-
-	// Get the inner type of the slice
-	innerType := outerValue.Type().Elem()
-	innerTypeIsPointer := false
-	if innerType.Kind() == reflect.Ptr {
-		// If a pointer get the underlying type
-		innerTypeIsPointer = true
-		innerType = innerType.Elem()
-	}
-
-	if innerType.Kind() != reflect.Struct {
-		return recordErrors, fmt.Errorf("You must provide a struct as the type of the out slice")
 	}
 
 	source := sb.String()
