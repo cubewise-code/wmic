@@ -6,6 +6,8 @@ import (
 	"encoding/csv"
 	"errors"
 	"io"
+	"log"
+	"os"
 	"os/exec"
 	"reflect"
 	"strings"
@@ -73,37 +75,53 @@ func Query(class string, columns []string, where string, out interface{}) error 
 	if outerValue.Kind() == reflect.Ptr {
 		outerValue = outerValue.Elem()
 	}
-	defer outerValue.Close()
+
 	innerType := outerValue.Type().Elem()
+	innerTypeIsPointer := false
 	if innerType.Kind() == reflect.Ptr {
+		innerTypeIsPointer = true
 		innerType = innerType.Elem()
 	}
 
 	source := sb.String()
+
 	csvReader := csv.NewReader(strings.NewReader(source))
 	csvReader.LazyQuotes = true
+	csvReader.TrimLeadingSpace = true
 
 	dec, err := csvutil.NewDecoder(csvReader)
 	if err != nil {
 		return err
 	}
 
-	result := make([]reflect.Value, 0)
+	result := make([]interface{}, 0)
 
 	for {
-		i := reflect.New(innerType)
+		i := reflect.New(innerType).Interface()
 		if err := dec.Decode(&i); err == io.EOF {
 			break
+		} else if _, ok := err.(*csv.ParseError); ok {
+			// Ignore parsing error
+			items := dec.Record()
+			if os.Getenv("WMIDebug") != "" {
+				log.Println(class + " " + err.Error() + ": " + strings.Join(items, ","))
+			}
+			continue
 		} else if err != nil {
-			// Ignore errors
+			return err
 		}
 		result = append(result, i)
 	}
 
 	outerValue.Set(reflect.MakeSlice(outerValue.Type(), len(result), len(result)))
 
-	for _, i := range result {
-		outerValue.Send(i)
+	for i, val := range result {
+		v := reflect.ValueOf(val)
+		if innerTypeIsPointer {
+			outerValue.Index(i).Set(v)
+		} else {
+			outerValue.Index(i).Set(v.Elem())
+		}
 	}
 
 	return nil
