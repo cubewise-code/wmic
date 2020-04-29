@@ -7,8 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
-	"os"
 	"os/exec"
 	"reflect"
 	"strings"
@@ -16,23 +14,39 @@ import (
 	"github.com/jszwec/csvutil"
 )
 
+// RecordError holds information about an error for record in the WMI result
+type RecordError struct {
+	Class   string
+	Line    int
+	Items   []string
+	Message string
+}
+
+// Record returns the line as a csv
+func (e *RecordError) Record() string {
+	return strings.Join(e.Items, ",")
+}
+
 // QueryAll returns all items with all columns
-func QueryAll(class string, out interface{}) error {
+func QueryAll(class string, out interface{}) ([]RecordError, error) {
 	return Query(class, []string{}, "", out)
 }
 
 // QueryColumns returns all items with specific columns
-func QueryColumns(class string, columns []string, out interface{}) error {
+func QueryColumns(class string, columns []string, out interface{}) ([]RecordError, error) {
 	return Query(class, columns, "", out)
 }
 
 // QueryWhere returns all columns for where clause
-func QueryWhere(class, where string, out interface{}) error {
+func QueryWhere(class, where string, out interface{}) ([]RecordError, error) {
 	return Query(class, []string{}, where, out)
 }
 
 // Query returns a WMI query with the given parameters
-func Query(class string, columns []string, where string, out interface{}) error {
+func Query(class string, columns []string, where string, out interface{}) ([]RecordError, error) {
+
+	recordErrors := []RecordError{}
+
 	query := []string{"PATH", class}
 	if where != "" {
 		parts := strings.Split(strings.TrimSpace(where), " ")
@@ -56,10 +70,10 @@ func Query(class string, columns []string, where string, out interface{}) error 
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	if err != nil {
-		return err
+		return recordErrors, err
 	}
 	if stderr.Len() > 0 {
-		return errors.New(string(stderr.Bytes()))
+		return recordErrors, errors.New(string(stderr.Bytes()))
 	}
 	str := string(stdout.Bytes())
 	scanner := bufio.NewScanner(strings.NewReader(str))
@@ -79,7 +93,7 @@ func Query(class string, columns []string, where string, out interface{}) error 
 	}
 
 	if outerValue.Kind() != reflect.Slice {
-		return fmt.Errorf("You must provide a slice to the out argument")
+		return recordErrors, fmt.Errorf("You must provide a slice to the out argument")
 	}
 
 	// Get the inner type of the slice
@@ -92,7 +106,7 @@ func Query(class string, columns []string, where string, out interface{}) error 
 	}
 
 	if innerType.Kind() != reflect.Struct {
-		return fmt.Errorf("You must provide a struct as the type of the out slice")
+		return recordErrors, fmt.Errorf("You must provide a struct as the type of the out slice")
 	}
 
 	source := sb.String()
@@ -103,7 +117,7 @@ func Query(class string, columns []string, where string, out interface{}) error 
 
 	dec, err := csvutil.NewDecoder(csvReader)
 	if err != nil {
-		return err
+		return recordErrors, err
 	}
 
 	result := make([]interface{}, 0)
@@ -113,16 +127,14 @@ func Query(class string, columns []string, where string, out interface{}) error 
 		i := reflect.New(innerType).Interface()
 		if err := dec.Decode(&i); err == io.EOF {
 			break
-		} else if _, ok := err.(*csv.ParseError); ok {
+		} else if csvError, ok := err.(*csv.ParseError); ok {
 			// Ignore parsing error
 			items := dec.Record()
-			if os.Getenv("WMIDebug") != "" {
-				log.Println(class + " " + err.Error() + ": " + strings.Join(items, ","))
-			}
+			recordErrors = append(recordErrors, RecordError{Class: class, Items: items, Line: csvError.Line, Message: csvError.Error()})
 			continue
 		} else if err != nil {
 			// Error so exit function
-			return err
+			return recordErrors, err
 		}
 		result = append(result, i)
 	}
@@ -140,5 +152,5 @@ func Query(class string, columns []string, where string, out interface{}) error 
 		}
 	}
 
-	return nil
+	return recordErrors, nil
 }
