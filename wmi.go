@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/csv"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -71,16 +72,27 @@ func Query(class string, columns []string, where string, out interface{}) error 
 		}
 	}
 
+	// Get the outer type (needs to be a slice)
 	outerValue := reflect.ValueOf(out)
 	if outerValue.Kind() == reflect.Ptr {
 		outerValue = outerValue.Elem()
 	}
 
+	if outerValue.Kind() != reflect.Slice {
+		return fmt.Errorf("You must provide a slice to the out argument")
+	}
+
+	// Get the inner type of the slice
 	innerType := outerValue.Type().Elem()
 	innerTypeIsPointer := false
 	if innerType.Kind() == reflect.Ptr {
+		// If a pointer get the underlying type
 		innerTypeIsPointer = true
 		innerType = innerType.Elem()
+	}
+
+	if innerType.Kind() != reflect.Struct {
+		return fmt.Errorf("You must provide a struct as the type of the out slice")
 	}
 
 	source := sb.String()
@@ -97,6 +109,7 @@ func Query(class string, columns []string, where string, out interface{}) error 
 	result := make([]interface{}, 0)
 
 	for {
+		// Loop through all of the results and populate result slice
 		i := reflect.New(innerType).Interface()
 		if err := dec.Decode(&i); err == io.EOF {
 			break
@@ -108,14 +121,17 @@ func Query(class string, columns []string, where string, out interface{}) error 
 			}
 			continue
 		} else if err != nil {
+			// Error so exit function
 			return err
 		}
 		result = append(result, i)
 	}
 
+	// Resize the out slice to match the number of records
 	outerValue.Set(reflect.MakeSlice(outerValue.Type(), len(result), len(result)))
 
 	for i, val := range result {
+		// Update the out slice with each item
 		v := reflect.ValueOf(val)
 		if innerTypeIsPointer {
 			outerValue.Index(i).Set(v)
