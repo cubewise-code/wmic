@@ -130,11 +130,15 @@ func Query(class string, columns []string, where string, out interface{}) ([]Rec
 		} else {
 			contentStarted = true
 			parts := strings.SplitN(s, "=", 2)
-			param := parts[0]
-			val := parts[1]
-			err = set(param, val, item)
-			if err != nil {
-				recordErrors = append(recordErrors, RecordError{Class: class, Field: param, Line: line, Message: err.Error()})
+			if len(parts) == 2 {
+				param := parts[0]
+				val := strings.TrimSpace(parts[1])
+				if val != "" {
+					err = set(param, val, item)
+					if err != nil {
+						recordErrors = append(recordErrors, RecordError{Class: class, Field: param, Line: line, Message: err.Error()})
+					}
+				}
 			}
 		}
 	}
