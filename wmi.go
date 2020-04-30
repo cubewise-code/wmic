@@ -132,7 +132,7 @@ func Query(class string, columns []string, where string, out interface{}) ([]Rec
 			parts := strings.SplitN(s, "=", 2)
 			param := parts[0]
 			val := parts[1]
-			err = set(param, val, reflect.ValueOf(item).Elem())
+			err = set(param, val, item)
 			if err != nil {
 				recordErrors = append(recordErrors, RecordError{Class: class, Field: param, Line: line, Message: err.Error()})
 			}
@@ -160,8 +160,15 @@ func Query(class string, columns []string, where string, out interface{}) ([]Rec
 	return recordErrors, nil
 }
 
-func set(field, s string, v reflect.Value) error {
+func set(field, s string, item interface{}) error {
+	v := reflect.ValueOf(item)
+	if v.Kind() == reflect.Ptr {
+		v = v.Elem()
+	}
 	f := v.FieldByName(field)
+	if !f.IsValid() {
+		return fmt.Errorf("Cannot find field %s, check case", field)
+	}
 	switch f.Kind() {
 	case reflect.String:
 		return setString(s, f)
