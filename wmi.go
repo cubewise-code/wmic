@@ -21,6 +21,25 @@ type RecordError struct {
 	Message string
 }
 
+// FieldError is an error for a missing field
+type FieldError struct {
+	Field string
+}
+
+func (e *FieldError) Error() string {
+	return fmt.Sprintf("Cannot find field %s, names are case-sensitive", e.Field)
+}
+
+// UnsupportedTypeError is an error for a field type that isn't supported
+type UnsupportedTypeError struct {
+	Field string
+	Type  string
+}
+
+func (e *UnsupportedTypeError) Error() string {
+	return fmt.Sprintf("Field %s has an unsupported type %s", e.Field, e.Type)
+}
+
 // QueryAll returns all items with columns matching the out struct
 func QueryAll(class string, out interface{}) ([]RecordError, error) {
 	return Query(class, []string{}, "", out)
@@ -136,6 +155,12 @@ func Query(class string, columns []string, where string, out interface{}) ([]Rec
 				if val != "" {
 					err = set(param, val, item)
 					if err != nil {
+						if _, ok := err.(*FieldError); ok {
+							return recordErrors, err
+						} else if _, ok := err.(*UnsupportedTypeError); ok {
+							return recordErrors, err
+						}
+						// Error that allows continuation
 						recordErrors = append(recordErrors, RecordError{Class: class, Field: param, Line: line, Message: err.Error()})
 					}
 				}
@@ -171,7 +196,7 @@ func set(field, s string, item interface{}) error {
 	}
 	f := v.FieldByName(field)
 	if !f.IsValid() {
-		return fmt.Errorf("Cannot find field %s, check case", field)
+		return &FieldError{Field: field}
 	}
 	switch f.Kind() {
 	case reflect.String:
@@ -185,7 +210,7 @@ func set(field, s string, item interface{}) error {
 	case reflect.Bool:
 		return setBool(s, f)
 	}
-	return fmt.Errorf("Unsupported field type %s", f.Kind())
+	return &UnsupportedTypeError{Field: field, Type: f.Kind().String()}
 }
 
 func setString(s string, v reflect.Value) error {
