@@ -3,15 +3,12 @@ package wmic
 import (
 	"bufio"
 	"bytes"
-	"encoding/csv"
 	"errors"
 	"fmt"
-	"io"
 	"os/exec"
 	"reflect"
+	"strconv"
 	"strings"
-
-	"github.com/jszwec/csvutil"
 )
 
 var fieldCache = map[string]string{}
@@ -19,14 +16,28 @@ var fieldCache = map[string]string{}
 // RecordError holds information about an error for record in the WMI result
 type RecordError struct {
 	Class   string
+	Field   string
 	Line    int
-	Items   []string
 	Message string
 }
 
-// Record returns the line as a csv
-func (e *RecordError) Record() string {
-	return strings.Join(e.Items, ",")
+// FieldError is an error for a missing field
+type FieldError struct {
+	Field string
+}
+
+func (e *FieldError) Error() string {
+	return fmt.Sprintf("Cannot find field %s, names are case-sensitive", e.Field)
+}
+
+// UnsupportedTypeError is an error for a field type that isn't supported
+type UnsupportedTypeError struct {
+	Field string
+	Type  string
+}
+
+func (e *UnsupportedTypeError) Error() string {
+	return fmt.Sprintf("Field %s has an unsupported type %s", e.Field, e.Type)
 }
 
 // QueryAll returns all items with columns matching the out struct
@@ -104,7 +115,8 @@ func Query(class string, columns []string, where string, out interface{}) ([]Rec
 	} else {
 		query = append(query, strings.Join(columns, ","))
 	}
-	query = append(query, "/format:csv")
+	query = append(query, "/format:rawxml")
+	query = append(query, "/VALUE")
 	cmd := exec.Command("wmic", query...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -116,45 +128,49 @@ func Query(class string, columns []string, where string, out interface{}) ([]Rec
 	if stderr.Len() > 0 {
 		return recordErrors, errors.New(string(stderr.Bytes()))
 	}
-	str := string(stdout.Bytes())
-	scanner := bufio.NewScanner(strings.NewReader(str))
-	var sb strings.Builder
-	for scanner.Scan() {
-		s := scanner.Text()
-		if strings.TrimSpace(s) != "" {
-			sb.WriteString(strings.ReplaceAll(s, "\"", ""))
-			sb.WriteString("\n")
-		}
-	}
-
-	source := sb.String()
-
-	csvReader := csv.NewReader(strings.NewReader(source))
-	csvReader.LazyQuotes = true
-	csvReader.TrimLeadingSpace = true
-
-	dec, err := csvutil.NewDecoder(csvReader)
-	if err != nil {
-		return recordErrors, err
-	}
 
 	result := make([]interface{}, 0)
 
-	for {
-		// Loop through all of the results and populate result slice
-		i := reflect.New(innerType).Interface()
-		if err := dec.Decode(&i); err == io.EOF {
-			break
-		} else if csvError, ok := err.(*csv.ParseError); ok {
-			// Ignore parsing error
-			items := dec.Record()
-			recordErrors = append(recordErrors, RecordError{Class: class, Items: items, Line: csvError.Line, Message: csvError.Error()})
-			continue
-		} else if err != nil {
-			// Error so exit function
-			return recordErrors, err
+	// Loop over the string
+	str := string(stdout.Bytes())
+	scanner := bufio.NewScanner(strings.NewReader(str))
+	item := reflect.New(innerType).Interface()
+	contentStarted := false
+	line := 1
+	for scanner.Scan() {
+		s := strings.TrimSpace(scanner.Text())
+		if s == "" {
+			if contentStarted {
+				line++
+				result = append(result, item)
+				item = reflect.New(innerType).Interface()
+				contentStarted = false
+			}
+		} else {
+			contentStarted = true
+			parts := strings.SplitN(s, "=", 2)
+			if len(parts) == 2 {
+				param := parts[0]
+				val := strings.TrimSpace(parts[1])
+				if val != "" {
+					err = set(param, val, item)
+					if err != nil {
+						if _, ok := err.(*FieldError); ok {
+							return recordErrors, err
+						} else if _, ok := err.(*UnsupportedTypeError); ok {
+							return recordErrors, err
+						}
+						// Error that allows continuation
+						recordErrors = append(recordErrors, RecordError{Class: class, Field: param, Line: line, Message: err.Error()})
+					}
+				}
+			}
 		}
-		result = append(result, i)
+	}
+
+	if contentStarted {
+		// Add remaining item if there is one
+		result = append(result, item)
 	}
 
 	// Resize the out slice to match the number of records
@@ -171,4 +187,69 @@ func Query(class string, columns []string, where string, out interface{}) ([]Rec
 	}
 
 	return recordErrors, nil
+}
+
+func set(field, s string, item interface{}) error {
+	v := reflect.ValueOf(item)
+	if v.Kind() == reflect.Ptr {
+		v = v.Elem()
+	}
+	f := v.FieldByName(field)
+	if !f.IsValid() {
+		return &FieldError{Field: field}
+	}
+	switch f.Kind() {
+	case reflect.String:
+		return setString(s, f)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return setIntN(s, f, f.Type().Bits())
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return setUintN(s, f, f.Type().Bits())
+	case reflect.Float32, reflect.Float64:
+		return setFloatN(s, f, f.Type().Bits())
+	case reflect.Bool:
+		return setBool(s, f)
+	}
+	return &UnsupportedTypeError{Field: field, Type: f.Kind().String()}
+}
+
+func setString(s string, v reflect.Value) error {
+	v.SetString(s)
+	return nil
+}
+
+func setIntN(s string, v reflect.Value, bits int) error {
+	n, err := strconv.ParseInt(s, 10, bits)
+	if err != nil {
+		return fmt.Errorf("Unable to set field %s type %s", v.Type().Name, s)
+	}
+	v.SetInt(n)
+	return nil
+}
+
+func setUintN(s string, v reflect.Value, bits int) error {
+	n, err := strconv.ParseUint(s, 10, bits)
+	if err != nil {
+		return fmt.Errorf("Unable to set field %s type %s", v.Type().Name, s)
+	}
+	v.SetUint(n)
+	return nil
+}
+
+func setFloatN(s string, v reflect.Value, bits int) error {
+	n, err := strconv.ParseFloat(s, bits)
+	if err != nil {
+		return fmt.Errorf("Unable to set field %s type %s", v.Type().Name, s)
+	}
+	v.SetFloat(n)
+	return nil
+}
+
+func setBool(s string, v reflect.Value) error {
+	b, err := strconv.ParseBool(s)
+	if err != nil {
+		return fmt.Errorf("Unable to set field %s type %s", v.Type().Name, s)
+	}
+	v.SetBool(b)
+	return nil
 }
